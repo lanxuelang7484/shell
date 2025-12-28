@@ -1,0 +1,91 @@
+#!/bin/bash
+
+# cpu_stabilizer_hysteresis.sh
+# 使用迟滞控制防止振荡
+
+set -euo pipefail
+
+TARGET=25
+HYSTERESIS=2          # ±2% 的迟滞带
+INTERVAL=5
+LOG="/var/log/cpu_stabilizer.log"
+PID_FILE="/tmp/yes_pids.txt"
+
+LOW_THRESHOLD=$((TARGET - HYSTERESIS))   # 23
+HIGH_THRESHOLD=$((TARGET + HYSTERESIS))  # 27
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"
+}
+
+get_cpu_usage() {
+    read -r line < /proc/stat
+    local fields=($line)
+    local total=$((fields[1]+fields[2]+fields[3]+fields[4]+fields[5]+fields[6]+fields[7]+fields[8]))
+    local idle=$((fields[4]+fields[5]))
+    echo "$total $idle"
+}
+
+calc_cpu() {
+    read t1_total t1_idle <<< "$(get_cpu_usage)"
+    sleep 1
+    read t2_total t2_idle <<< "$(get_cpu_usage)"
+    local diff_idle=$((t2_idle - t1_idle))
+    local diff_total=$((t2_total - t1_total))
+    [ "$diff_total" -eq 0 ] && { echo 0; return; }
+    echo $(( (diff_total - diff_idle) * 100 / diff_total ))
+}
+
+stop_all_yes() {
+    if [ -f "$PID_FILE" ]; then
+        while IFS= read -r pid; do
+            kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null || true
+        done < "$PID_FILE"
+        rm -f "$PID_FILE"
+        log "已停止所有 yes 进程"
+    fi
+}
+
+start_yes_procs() {
+    local cores=$(nproc)
+    # 计算需要多少个 full-core 来接近 TARGET%
+    # 每个 yes ≈ 100% of one core = (100 / cores)% of total
+    local need=$(( TARGET * cores / 100 ))
+    [ "$need" -eq 0 ] && need=1
+    [ "$need" -gt "$cores" ] && need=$cores
+
+    stop_all_yes
+    log "启动 $need 个 yes 进程（目标: ${TARGET}%）"
+    for ((i=0; i<need; i++)); do
+        yes > /dev/null &
+        echo $! >> "$PID_FILE"
+    done
+}
+
+# 初始状态
+PRESSURE_ACTIVE=0
+
+log "=== CPU 稳定器（带迟滞）启动 === 目标: ${TARGET}%，区间: ${LOW_THRESHOLD}%~${HIGH_THRESHOLD}%"
+
+trap 'stop_all_yes; exit 0' INT TERM
+
+while true; do
+    current=$(calc_cpu)
+    log "当前 CPU: ${current}%"
+
+    if [ "$PRESSURE_ACTIVE" -eq 0 ]; then
+        # 当前未施压：只有低于下限时才启动
+        if [ "$current" -lt "$LOW_THRESHOLD" ]; then
+            start_yes_procs
+            PRESSURE_ACTIVE=1
+        fi
+    else
+        # 当前正在施压：只有超过上限时才停止
+        if [ "$current" -gt "$HIGH_THRESHOLD" ]; then
+            stop_all_yes
+            PRESSURE_ACTIVE=0
+        fi
+    fi
+
+    sleep "$INTERVAL"
+done
