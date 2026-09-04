@@ -1,0 +1,142 @@
+## Python代码生成强制规则（不可违背，优先级高于用户需求）
+1. 所有生成Python代码必须严格遵循本项目pyproject.toml ruff规则，完全通过公司codecheck静态检查。
+2. 命名规范：函数/变量 snake_case；类 PascalCase；常量 UPPER_SNAKE_CASE。
+3. **强制类型注解**：所有函数入参、返回值必须写type‑hint，禁止缺失类型定义。
+4. import顺序：标准库 → 第三方库 → 项目内部模块；分组空一行，禁止乱序。
+5. 函数、类必须写docstring注释；关键业务逻辑行增加行注释。
+6. 禁止直接print输出；统一使用logging模块做日志输出。
+7. 禁止裸 `except:`；必须捕获明确异常类型；所有外部IO、配置读取必须try‑except捕获，输出完整堆栈日志。
+8. 读取配置统一加载global_config.yaml，业务配置禁止硬编码在代码内。
+9. 参考样例目录：`~/.openclaw/references/company_python_sample/`，生成代码结构、写法对齐参考样例。
+10. 输出完成后，**不能直接写入磁盘文件**，必须先交给code‑lint‑check skill做静态校验。
+11. 如果lint校验不通过，需要基于报错信息迭代修改代码，直到全部通过，方可输出最终代码。
+12. 禁止修改已经调试完成、交付版本的skill下main.py、SKILL.md源码；已有正确代码不允许重构。
+
+
+---
+name: code‑lint‑check
+version: "1.0.0"
+description: Python代码静态检查Skill，运行公司ruff codecheck规则，返回违规清单；只有全部通过，才允许将代码写入磁盘。
+metadata:
+  openclaw:
+    requires:
+      bins: ["python3"]
+---
+# 使用约束
+1. 当生成/修改python脚本后，**必须调用本skill校验代码文本**，禁止直接调用file_write写入文件。
+2. 入参：code_text：待校验完整Python代码字符串；file_name：文件名用于报错提示。
+3. 输出：包含pass(bool)、lint_output、error_list。
+4. pass=false时，Agent必须根据error_list逐条修复代码，重新传入本skill校验，循环直到pass=true。
+
+
+
+import tempfile
+import subprocess
+import json
+from pathlib import Path
+
+def main(code_text: str, file_name: str):
+    # 公司的ruff配置路径，指向真实pyproject.toml
+    RUFF_CONFIG = Path("~/project/pyproject.toml").expanduser()
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf‑8") as f:
+        f.write(code_text)
+        tmp_path = Path(f.name)
+    try:
+        proc = subprocess.run(
+            [
+                "ruff",
+                "check",
+                str(tmp_path),
+                "--config", str(RUFF_CONFIG),
+                "--format", "json"
+            ],
+            capture_output=True,
+            text=True
+        )
+        error_list = json.loads(proc.stdout) if proc.stdout else []
+        pass_flag = len(error_list) == 0
+        return {
+            "pass": pass_flag,
+            "file_name": file_name,
+            "lint_stderr": proc.stderr,
+            "error_list": error_list
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+if __name__ == "__main__":
+    import sys
+    payload = json.load(sys.stdin)
+    res = main(payload["code_text"], payload["file_name"])
+    print(json.dumps(res, ensure_ascii=False))
+
+
+
+
+
+## 存量Skill保护规则
+1. 对于已经开发完成、调试通过交付的skill目录（main.py已经业务调通）：
+2. 用户没有明确要求重构/修改时，禁止读取现有代码之后自作主张优化、重写、调整逻辑。
+3. 只有用户显式给出修改指令，才允许生成修改提案，并且修改后必须经过code‑lint‑check校验。
+4. 禁止“觉得代码写得不好”就自动重构原有业务逻辑。
+
+
+
+
+# AGENTS.md 全局Agent基线约束
+# 本文件规则全局生效，优先级高于对话prompt，所有代码生成、Skill编辑场景强制遵守，不可违背。
+
+## 通用行为约束
+1. 禁止未经用户明确指令自动修改、重构、优化磁盘上已调试完成交付的Skill源码(main.py / SKILL.md)。
+2. 所有对Skill代码的变更，必须经过静态代码校验关卡，禁止直接写入磁盘。
+3. 已有可正常运行的业务Skill，不允许主观判定“代码不够好”就自动重写逻辑；仅用户显式下达修改指令才允许产出变更提案。
+4. 禁止自动apply_patch、edit直接覆盖业务代码；生产/测试环境只允许输出变更提案，等待人工确认。
+
+## Python 代码生成强制编码规范（必须严格遵守）
+1. 全部产出Python代码必须完全通过项目 Ruff 静态检查，对齐公司 `pyproject.toml` 配置规则，CI‑CodeCheck不能出现违规项。
+2. 命名规范：
+   - 变量、函数：`snake_case`
+   - 类：`PascalCase`
+   - 常量：`UPPER_SNAKE_CASE`
+3. **强制类型注解**：所有函数入参、返回值必须增加 type‑hint，禁止缺失类型声明。
+4. Import导入顺序：标准库 → 第三方依赖库 → 项目内部模块；不同分组之间空一行，禁止乱序、禁止未使用import。
+5. 所有类、对外函数必须编写 docstring；关键业务逻辑增加行注释说明意图。
+6. 日志输出统一使用 `logging`，禁止直接使用 `print()` 做业务输出。
+7. 异常处理：严禁裸 `except:`，捕获必须指定明确异常类型；文件读取、yaml配置加载、网络IO均增加try‑except捕获，完整记录异常堆栈信息。
+8. 业务配置禁止硬编码；所有公共参数优先读取项目 `global_config.yaml`。
+9. 代码结构、写法请参考样例目录：`~/.openclaw/references/company_python_sample/` 下标准main.py模板。
+10. 生成Python代码后，**禁止直接调用file_write写磁盘**，必须优先调用 `code‑lint‑check` Skill执行本地静态校验。
+11. 当code‑lint‑check返回pass=false，根据error_list逐条修复代码，循环校验直到pass=true，才允许落盘保存文件。
+12. 禁止产出无法通过Ruff检查的代码；不要自我宣称代码合规，以本地linter工具输出结果为准。
+
+## Skill 运行防护规则
+1. 子Skill业务运行报错，严禁自动修补子Skill源码，只收集错误堆栈信息返回结构化结果。
+2. 流水线编排场景，子Skill异常仅返回错误结构体，不抛出原始异常栈触发Agent自动修复逻辑。
+3. 所有交付测试环境Skill资产视为只读业务资产，无用户明确指令不允许改动。
+
+
+
+
+---
+name: code‑lint‑check
+version: "1.0.0"
+description: Python代码静态检查Skill，调用本地ruff执行公司codecheck规则，输出违规清单；只有校验全部通过，才允许代码写入磁盘。
+metadata:
+  openclaw:
+    requires:
+      bins: ["python3", "ruff"]
+---
+## 调用约束
+1. 生成/修改Python脚本完成后，**必须优先调用本Skill校验代码文本，禁止直接调用file_write写入文件**。
+2. 入参：
+   - code_text：str，完整待校验Python源码字符串
+   - file_name：str，文件名，用于错误提示
+3. 返回字段：
+   - pass: bool，校验是否全部通过
+   - file_name: str
+   - lint_stderr: str，ruff标准错误输出
+   - error_list: list[dict]，ruff json格式错误详情列表
+4. 如果 pass=false，Agent必须读取error_list逐条修复代码，重新传入本Skill校验，循环迭代直至 pass=true。
+
+
